@@ -6,12 +6,81 @@
   // ==========================================
   const API_URL = 'https://learningsphere.ifen.lu/ifen_html/smart_elements/accordion/accordion_api.php';
   const PERMISSIONS_API_URL = 'https://learningsphere.ifen.lu/ifen_html/api/user_permissions_api.php';
+  const IFEN_EDITOR_URL = 'https://learningsphere.ifen.lu/ifen_html/ifen-advanced-editor/ifen-advanced-editor.js';
   
   // Cache pour les permissions utilisateur
   let userPermissionsCache = null;
   
   // Accordéons actuellement édités
   const editedAccordions = new Map();
+  
+  // Instance de l'éditeur IFEN actuel
+  // Instance de l'éditeur IFEN actuel (accessible globalement pour debug)
+  window._accordionCurrentEditor = null;
+  window.getCurrentEditor = function() { return window._accordionCurrentEditor; };
+  
+  // Flag pour vérifier si le script IFEN est chargé
+  let ifenEditorLoaded = false;
+
+  // ==========================================
+  // CHARGEMENT DE L'ÉDITEUR IFEN
+  // ==========================================
+  
+  /**
+   * Charger le script de l'éditeur IFEN de manière dynamique
+   */
+  function loadIFENEditor() {
+    return new Promise((resolve, reject) => {
+      // Vérifier si déjà chargé
+      if (typeof IFENAdvancedEditor !== 'undefined') {
+        ifenEditorLoaded = true;
+        console.log('accordion: Éditeur IFEN déjà chargé');
+        resolve();
+        return;
+      }
+      
+      // Vérifier si le script est déjà dans le DOM
+      if (document.querySelector(`script[src="${IFEN_EDITOR_URL}"]`)) {
+        // Le script est en cours de chargement
+        const checkInterval = setInterval(() => {
+          if (typeof IFENAdvancedEditor !== 'undefined') {
+            clearInterval(checkInterval);
+            ifenEditorLoaded = true;
+            console.log('accordion: Éditeur IFEN chargé');
+            resolve();
+          }
+        }, 100);
+        
+        // Timeout après 10 secondes
+        setTimeout(() => {
+          clearInterval(checkInterval);
+          if (!ifenEditorLoaded) {
+            reject(new Error('Timeout lors du chargement de l\'éditeur IFEN'));
+          }
+        }, 10000);
+        return;
+      }
+      
+      // Charger le script
+      console.log('accordion: Chargement de l\'éditeur IFEN...');
+      const script = document.createElement('script');
+      script.src = IFEN_EDITOR_URL;
+      script.async = true;
+      
+      script.onload = () => {
+        ifenEditorLoaded = true;
+        console.log('accordion: ✅ Éditeur IFEN chargé avec succès');
+        resolve();
+      };
+      
+      script.onerror = () => {
+        console.error('accordion: ❌ Erreur lors du chargement de l\'éditeur IFEN');
+        reject(new Error('Impossible de charger l\'éditeur IFEN'));
+      };
+      
+      document.head.appendChild(script);
+    });
+  }
 
   // ==========================================
   // PERMISSIONS
@@ -444,7 +513,7 @@
         border: none;
         border-radius: 20px;
         width: 90%;
-        max-width: 800px;
+        max-width: 900px;
         max-height: 85vh;
         overflow: hidden;
         box-shadow: 0 10px 40px rgba(31, 21, 77, 0.3);
@@ -496,21 +565,17 @@
         box-shadow: 0 0 0 3px rgba(0, 178, 187, 0.1);
       }
       
-      .accordion-edit-form-group textarea {
+      /* Container pour l'éditeur IFEN */
+      .accordion-edit-form-group .ifen-editor-container {
         width: 100%;
-        min-height: 200px;
-        padding: 12px;
+        min-height: 350px;
         border: 2px solid #e0e0e0;
         border-radius: 10px;
-        font-size: 15px;
-        font-family: 'Barlow Semi Condensed', sans-serif;
-        resize: vertical;
-        box-sizing: border-box;
+        overflow: hidden;
         transition: border-color 0.2s ease;
       }
       
-      .accordion-edit-form-group textarea:focus {
-        outline: none;
+      .accordion-edit-form-group .ifen-editor-container:focus-within {
         border-color: #00b2bb;
         box-shadow: 0 0 0 3px rgba(0, 178, 187, 0.1);
       }
@@ -576,9 +641,20 @@
   // ==========================================
 
   /**
-   * Afficher le modal d'édition
+   * Afficher le modal d'édition avec l'éditeur IFEN
    */
-  function showEditModal(accordionid, courseid, itemData = null) {
+  async function showEditModal(accordionid, courseid, itemData = null) {
+    // S'assurer que l'éditeur IFEN est chargé
+    if (!ifenEditorLoaded) {
+      try {
+        await loadIFENEditor();
+      } catch (error) {
+        alert('Impossible de charger l\'éditeur. Veuillez recharger la page.');
+        console.error(error);
+        return;
+      }
+    }
+    
     let modal = document.getElementById('accordion-edit-modal');
     
     if (!modal) {
@@ -594,8 +670,8 @@
               <input type="text" id="accordion-edit-title" required>
             </div>
             <div class="accordion-edit-form-group">
-              <label for="accordion-edit-content">Contenu (HTML autorisé):</label>
-              <textarea id="accordion-edit-content" required></textarea>
+              <label for="accordion-edit-content-container">Contenu (éditeur riche):</label>
+              <div id="accordion-edit-content-container" class="ifen-editor-container"></div>
             </div>
             <div class="accordion-edit-form-group">
               <label>
@@ -615,34 +691,96 @@
       // Fermer en cliquant sur le fond
       modal.addEventListener('click', (e) => {
         if (e.target === modal) {
-          modal.style.display = 'none';
+          closeEditModal();
         }
       });
       
       // Bouton annuler
       document.getElementById('accordion-edit-cancel').addEventListener('click', () => {
-        modal.style.display = 'none';
+        closeEditModal();
       });
     }
     
-    // Pré-remplir les champs
+    // Détruire l'ancienne instance de l'éditeur si elle existe
+    if (window._accordionCurrentEditor) {
+      try {
+        window._accordionCurrentEditor.destroy();
+      } catch (e) {
+        console.warn('accordion: Erreur lors de la destruction de l\'ancien éditeur:', e);
+      }
+      window._accordionCurrentEditor = null;
+    }
+    
+    // Pré-remplir le titre et la checkbox
     document.getElementById('accordion-edit-title').value = itemData?.title || '';
-    document.getElementById('accordion-edit-content').value = itemData?.content || '';
     document.getElementById('accordion-edit-expanded').checked = itemData?.isExpanded || false;
     
     // Afficher le modal
     modal.style.display = 'block';
-    document.getElementById('accordion-edit-title').focus();
+    
+    // Créer l'éditeur IFEN avec un léger délai pour s'assurer que le modal est affiché
+    setTimeout(() => {
+      try {
+        window._accordionCurrentEditor = IFENAdvancedEditor.create('#accordion-edit-content-container', {
+          placeholder: 'Entrez le contenu de cette section...',
+          minHeight: '300px',
+          maxHeight: '500px',
+          showCharCount: true
+        });
+        
+        // Charger le contenu existant
+        if (itemData?.content) {
+          window._accordionCurrentEditor.setValue(itemData.content);
+        }
+        
+        // Focus sur le titre
+        document.getElementById('accordion-edit-title').focus();
+        
+        console.log('accordion: ✅ Éditeur IFEN initialisé dans le modal');
+      } catch (error) {
+        console.error('accordion: ❌ Erreur lors de l\'initialisation de l\'éditeur:', error);
+        alert('Erreur lors de l\'initialisation de l\'éditeur. Veuillez réessayer.');
+        closeEditModal();
+      }
+    }, 100);
     
     // Handler de sauvegarde
     const saveBtn = document.getElementById('accordion-edit-save');
     saveBtn.onclick = async () => {
       const title = document.getElementById('accordion-edit-title').value.trim();
-      const content = document.getElementById('accordion-edit-content').value.trim();
       const isExpanded = document.getElementById('accordion-edit-expanded').checked;
       
-      if (!title || !content) {
-        alert('Le titre et le contenu sont obligatoires');
+      if (!title) {
+        alert('Le titre est obligatoire');
+        return;
+      }
+      
+      // Récupérer le contenu depuis l'éditeur IFEN
+      let content = '';
+      
+      // CORRECTION : Récupérer directement le HTML depuis le contenteditable
+      // au lieu d'utiliser getValue() qui ne retourne que le texte brut
+      const editorContent = document.querySelector('.ifen-editor-content');
+      
+      if (editorContent) {
+        content = editorContent.innerHTML.trim();
+        
+        // Convertir les balises <b> en <strong> et <i> en <em> pour la cohérence
+        content = content.replace(/<b>/gi, '<strong>').replace(/<\/b>/gi, '</strong>');
+        content = content.replace(/<i>/gi, '<em>').replace(/<\/i>/gi, '</em>');
+        
+        // Nettoyer les attributs YUI générés automatiquement
+        content = content.replace(/\s*id="yui_[^"]+"/g, '');
+        
+        console.log('accordion: 🔵 Contenu HTML récupéré directement:', content.substring(0, 150));
+      } else if (window._accordionCurrentEditor) {
+        // Fallback : utiliser getValue() si le contenteditable n'est pas trouvé
+        content = window._accordionCurrentEditor.getValue().trim();
+        console.log('accordion: ⚠️ Fallback getValue() utilisé:', content.substring(0, 150));
+      }
+      
+      if (!content) {
+        alert('Le contenu est obligatoire');
         return;
       }
       
@@ -656,17 +794,40 @@
         order: itemData?.order || 0
       };
       
+      console.log('accordion: ✅ Sauvegarde avec contenu HTML:', content.substring(0, 100) + '...');
+      
       const result = await saveAccordionItem(courseid, accordionid, dataToSave);
       
       if (result && result.success) {
-        modal.style.display = 'none';
+        closeEditModal();
         // Recharger l'accordéon
         await refreshAccordion(accordionid, courseid);
-        console.log('accordion: Item sauvegardé avec succès');
+        console.log('accordion: ✅ Item sauvegardé avec succès');
       } else {
         alert('Erreur lors de la sauvegarde. Veuillez réessayer.');
       }
     };
+  }
+  
+  /**
+   * Fermer le modal d'édition et nettoyer
+   */
+  function closeEditModal() {
+    const modal = document.getElementById('accordion-edit-modal');
+    if (modal) {
+      modal.style.display = 'none';
+    }
+    
+    // Détruire l'éditeur
+    if (window._accordionCurrentEditor) {
+      try {
+        window._accordionCurrentEditor.destroy();
+        console.log('accordion: Éditeur IFEN détruit');
+      } catch (e) {
+        console.warn('accordion: Erreur lors de la destruction de l\'éditeur:', e);
+      }
+      window._accordionCurrentEditor = null;
+    }
   }
 
   // ==========================================
@@ -903,6 +1064,11 @@
     
     if (canEdit) {
       accordion.classList.add('can-edit');
+      
+      // Pré-charger l'éditeur IFEN en arrière-plan
+      loadIFENEditor().catch(err => {
+        console.warn('accordion: Impossible de précharger l\'éditeur IFEN:', err);
+      });
       
       // Badge "Mode édition"
       if (!accordion.querySelector('.accordion-edit-badge')) {
